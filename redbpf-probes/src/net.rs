@@ -26,6 +26,11 @@ pub enum Transport {
     UDP(*const udphdr),
 }
 
+pub enum TransportMut {
+    TCP(*mut tcphdr),
+    UDP(*mut udphdr),
+}
+
 impl Transport {
     /// Returns the source port.
     #[inline]
@@ -43,6 +48,28 @@ impl Transport {
         let dest = match *self {
             Transport::TCP(hdr) => unsafe { (*hdr).dest },
             Transport::UDP(hdr) => unsafe { (*hdr).dest },
+        };
+        u16::from_be(dest)
+    }
+}
+
+impl TransportMut {
+    /// Returns the source port.
+    #[inline]
+    pub fn source(&self) -> u16 {
+        let source = match *self {
+            TransportMut::TCP(hdr) => unsafe { (*hdr).source },
+            TransportMut::UDP(hdr) => unsafe { (*hdr).source },
+        };
+        u16::from_be(source)
+    }
+
+    /// Returns the destination port.
+    #[inline]
+    pub fn dest(&self) -> u16 {
+        let dest = match *self {
+            TransportMut::TCP(hdr) => unsafe { (*hdr).dest },
+            TransportMut::UDP(hdr) => unsafe { (*hdr).dest },
         };
         u16::from_be(dest)
     }
@@ -86,6 +113,14 @@ where
 
         Ok(addr as *const U)
     }
+
+    #[inline]
+    unsafe fn ptr_at_mut<U>(&self, addr: usize) -> NetworkResult<*mut U> {
+        self.check_bounds(addr, addr + mem::size_of::<U>())?;
+
+        Ok(addr as *mut U)
+    }
+
     /// Returns a raw pointer to the address following `prev` plus the size of a `T`
     ///
     /// # Safety
@@ -99,6 +134,11 @@ where
     #[inline]
     unsafe fn ptr_after<T, U>(&self, prev: *const T) -> NetworkResult<*const U> {
         self.ptr_at(prev as usize + mem::size_of::<T>())
+    }
+
+    #[inline]
+    unsafe fn ptr_after_mut<T, U>(&self, prev: *const T) -> NetworkResult<*mut U> {
+        self.ptr_at_mut(prev as usize + mem::size_of::<T>())
     }
 
     #[inline]
@@ -124,6 +164,11 @@ where
         unsafe { self.ptr_at(self.data_start() as usize) }
     }
 
+    #[inline]
+    fn eth_mut(&self) -> NetworkResult<*mut ethhdr> {
+        unsafe { self.ptr_at_mut(self.data_start() as usize) }
+    }
+
     /// Returns the packet's `IP` header if present.
     #[inline]
     fn ip(&self) -> NetworkResult<*const iphdr> {
@@ -137,6 +182,18 @@ where
         }
     }
 
+    #[inline]
+    fn ip_mut(&self) -> NetworkResult<*mut iphdr> {
+        let eth = self.eth()?;
+        unsafe {
+            if (*eth).h_proto != u16::from_be(ETH_P_IP as u16) {
+                return Err(NetworkError::NoIPHeader);
+            }
+
+            self.ptr_after_mut(eth)
+        }
+    }
+
     /// Returns the packet's transport header if present.
     #[inline]
     fn transport(&self) -> NetworkResult<Transport> {
@@ -146,6 +203,22 @@ where
             let transport = match (*ip).protocol as u32 {
                 IPPROTO_TCP => (Transport::TCP(self.ptr_at(addr)?)),
                 IPPROTO_UDP => (Transport::UDP(self.ptr_at(addr)?)),
+                t => return Err(NetworkError::UnsupportedTransport(t)),
+            };
+
+            Ok(transport)
+        }
+    }
+
+    /// Returns the packet's transport header if present.
+    #[inline]
+    fn transport_mut(&self) -> NetworkResult<TransportMut> {
+        unsafe {
+            let ip = self.ip()?;
+            let addr = ip as usize + ((*ip).ihl() * 4) as usize;
+            let transport = match (*ip).protocol as u32 {
+                IPPROTO_TCP => (TransportMut::TCP(self.ptr_at_mut(addr)?)),
+                IPPROTO_UDP => (TransportMut::UDP(self.ptr_at_mut(addr)?)),
                 t => return Err(NetworkError::UnsupportedTransport(t)),
             };
 
